@@ -195,6 +195,7 @@ class AttributionContext:
         positions: torch.Tensor,
         inject_values: torch.Tensor,
         retain_graph: bool = True,
+        debug: bool = False,
     ) -> torch.Tensor:
         """Return attribution rows for a batch of (layer, pos) nodes.
 
@@ -210,6 +211,28 @@ class AttributionContext:
         Returns:
             torch.Tensor: ``(batch, row_size)`` matrix - one row per node.
         """
+        
+        if debug:
+            print(f"BACKWARD PASS HEALTH CHECK: Starting compute_batch...")
+            
+            # Check input health
+            inject_healthy = not (torch.isnan(inject_values).any() or torch.isinf(inject_values).any())
+            print(f"BACKWARD PASS HEALTH CHECK: Inject values healthy: {inject_healthy}")
+            if not inject_healthy:
+                print(f"BACKWARD PASS HEALTH CHECK: ❌ INJECT VALUES CONTAIN NaN/Inf!")
+                print(f"BACKWARD PASS HEALTH CHECK: Inject values range: [{inject_values.min():.6f}, {inject_values.max():.6f}]")
+                print(f"BACKWARD PASS HEALTH CHECK: Inject NaN count: {torch.isnan(inject_values).sum()}")
+                print(f"BACKWARD PASS HEALTH CHECK: Inject Inf count: {torch.isinf(inject_values).sum()}")
+            
+            # Check cached activations
+            for i, act in enumerate(self._resid_activations):
+                if act is not None:
+                    act_healthy = not (torch.isnan(act).any() or torch.isinf(act).any())
+                    if not act_healthy:
+                        print(f"BACKWARD PASS HEALTH CHECK: ❌ CACHED ACTIVATION {i} CONTAINS NaN/Inf!")
+                        print(f"BACKWARD PASS HEALTH CHECK: Act {i} range: [{act.min():.6f}, {act.max():.6f}]")
+                        print(f"BACKWARD PASS HEALTH CHECK: Act {i} NaN count: {torch.isnan(act).sum()}")
+                        break
 
         batch_size = self._resid_activations[0].shape[0]
         self._batch_buffer = torch.zeros(
@@ -253,7 +276,19 @@ class AttributionContext:
                 h.remove()
 
         buf, self._batch_buffer = self._batch_buffer, None
-        return buf.T[: len(layers)]
+        result = buf.T[: len(layers)]
+        
+        if debug:
+            print(f"BACKWARD PASS HEALTH CHECK: Backward pass completed, checking result...")
+            result_healthy = not (torch.isnan(result).any() or torch.isinf(result).any())
+            print(f"BACKWARD PASS HEALTH CHECK: Result healthy: {result_healthy}")
+            if not result_healthy:
+                print(f"BACKWARD PASS HEALTH CHECK: ❌ BACKWARD PASS RESULT CONTAINS NaN/Inf!")
+                print(f"BACKWARD PASS HEALTH CHECK: Result range: [{result.min():.6f}, {result.max():.6f}]")
+                print(f"BACKWARD PASS HEALTH CHECK: Result NaN count: {torch.isnan(result).sum()}")
+                print(f"BACKWARD PASS HEALTH CHECK: Result Inf count: {torch.isinf(result).sum()}")
+        
+        return result
 
 
 @torch.no_grad()
@@ -534,11 +569,79 @@ def _run_attribution(
     logger.info("Phase 0: Precomputing activations and vectors")
     phase_start = time.time()
     input_ids = ensure_tokenized(prompt, model.tokenizer)
+    
+    if debug:
+        print(f"HEALTH CHECK: Input IDs: {input_ids.shape}")
+        print(f"HEALTH CHECK: About to call model.setup_attribution...")
+    
     logits, activation_matrix, error_vecs, token_vecs = model.setup_attribution(
         input_ids, sparse=True
     )
+    
+    if debug:
+        print(f"HEALTH CHECK: setup_attribution completed, checking outputs...")
+        
+        # Check logits
+        logits_healthy = not (torch.isnan(logits).any() or torch.isinf(logits).any())
+        print(f"HEALTH CHECK: Logits healthy: {logits_healthy}")
+        if not logits_healthy:
+            print(f"HEALTH CHECK: ❌ LOGITS CONTAIN NaN/Inf!")
+            print(f"HEALTH CHECK: Logits range: [{logits.min():.6f}, {logits.max():.6f}]")
+            print(f"HEALTH CHECK: Logits NaN count: {torch.isnan(logits).sum()}")
+            print(f"HEALTH CHECK: Logits Inf count: {torch.isinf(logits).sum()}")
+        
+        # Check activation matrix values
+        act_values = activation_matrix.values()
+        act_healthy = not (torch.isnan(act_values).any() or torch.isinf(act_values).any())
+        print(f"HEALTH CHECK: Activation matrix values healthy: {act_healthy}")
+        if not act_healthy:
+            print(f"HEALTH CHECK: ❌ ACTIVATION MATRIX CONTAINS NaN/Inf!")
+            print(f"HEALTH CHECK: Activation values range: [{act_values.min():.6f}, {act_values.max():.6f}]")
+            print(f"HEALTH CHECK: Activation NaN count: {torch.isnan(act_values).sum()}")
+            print(f"HEALTH CHECK: Activation Inf count: {torch.isinf(act_values).sum()}")
+        
+        # Check error vectors
+        error_healthy = not (torch.isnan(error_vecs).any() or torch.isinf(error_vecs).any())
+        print(f"HEALTH CHECK: Error vectors healthy: {error_healthy}")
+        if not error_healthy:
+            print(f"HEALTH CHECK: ❌ ERROR VECTORS CONTAIN NaN/Inf!")
+            print(f"HEALTH CHECK: Error vectors range: [{error_vecs.min():.6f}, {error_vecs.max():.6f}]")
+            print(f"HEALTH CHECK: Error vectors NaN count: {torch.isnan(error_vecs).sum()}")
+            print(f"HEALTH CHECK: Error vectors Inf count: {torch.isinf(error_vecs).sum()}")
+        
+        # Check token vectors  
+        token_healthy = not (torch.isnan(token_vecs).any() or torch.isinf(token_vecs).any())
+        print(f"HEALTH CHECK: Token vectors healthy: {token_healthy}")
+        if not token_healthy:
+            print(f"HEALTH CHECK: ❌ TOKEN VECTORS CONTAIN NaN/Inf!")
+            print(f"HEALTH CHECK: Token vectors range: [{token_vecs.min():.6f}, {token_vecs.max():.6f}]")
+            print(f"HEALTH CHECK: Token vectors NaN count: {torch.isnan(token_vecs).sum()}")
+            print(f"HEALTH CHECK: Token vectors Inf count: {torch.isinf(token_vecs).sum()}")
+    
     decoder_vecs = select_scaled_decoder_vecs(activation_matrix, model.transcoders)
     encoder_rows = select_encoder_rows(activation_matrix, model.transcoders)
+    
+    if debug:
+        print(f"HEALTH CHECK: Checking decoder and encoder vectors...")
+        
+        # Check decoder vectors
+        decoder_healthy = not (torch.isnan(decoder_vecs).any() or torch.isinf(decoder_vecs).any())
+        print(f"HEALTH CHECK: Decoder vectors healthy: {decoder_healthy}")
+        if not decoder_healthy:
+            print(f"HEALTH CHECK: ❌ DECODER VECTORS CONTAIN NaN/Inf!")
+            print(f"HEALTH CHECK: Decoder vectors range: [{decoder_vecs.min():.6f}, {decoder_vecs.max():.6f}]")
+            print(f"HEALTH CHECK: Decoder vectors NaN count: {torch.isnan(decoder_vecs).sum()}")
+            print(f"HEALTH CHECK: Decoder vectors Inf count: {torch.isinf(decoder_vecs).sum()}")
+        
+        # Check encoder rows
+        encoder_healthy = not (torch.isnan(encoder_rows).any() or torch.isinf(encoder_rows).any())
+        print(f"HEALTH CHECK: Encoder rows healthy: {encoder_healthy}")
+        if not encoder_healthy:
+            print(f"HEALTH CHECK: ❌ ENCODER ROWS CONTAIN NaN/Inf!")
+            print(f"HEALTH CHECK: Encoder rows range: [{encoder_rows.min():.6f}, {encoder_rows.max():.6f}]")
+            print(f"HEALTH CHECK: Encoder rows NaN count: {torch.isnan(encoder_rows).sum()}")
+            print(f"HEALTH CHECK: Encoder rows Inf count: {torch.isinf(encoder_rows).sum()}")
+    
     ctx = AttributionContext(
         activation_matrix, error_vecs, token_vecs, decoder_vecs, model.feature_output_hook
     )
@@ -601,6 +704,7 @@ def _run_attribution(
             layers=torch.full((batch.shape[0],), n_layers),
             positions=torch.full((batch.shape[0],), n_pos - 1),
             inject_values=batch,
+            debug=debug,
         )
         edge_matrix[i : i + batch.shape[0], :logit_offset] = rows.cpu()
         row_to_node_index[i : i + batch.shape[0]] = (
@@ -638,6 +742,7 @@ def _run_attribution(
                 positions=feat_pos[idx_batch],
                 inject_values=encoder_rows[idx_batch],
                 retain_graph=n_visited < max_feature_nodes,
+                debug=debug,
             )
 
             end = min(st + batch_size, st + rows.shape[0])
