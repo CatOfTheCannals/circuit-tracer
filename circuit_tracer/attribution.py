@@ -656,7 +656,50 @@ def _run_attribution(
     phase_start = time.time()
     with ctx.install_hooks(model):
         residual = model.forward(input_ids.expand(batch_size, -1), stop_at_layer=model.cfg.n_layers)
-        ctx._resid_activations[-1] = model.ln_final(residual)
+        
+        if debug:
+            print(f"HEALTH CHECK: Checking residual before ln_final...")
+            residual_healthy = not (torch.isnan(residual).any() or torch.isinf(residual).any())
+            print(f"HEALTH CHECK: Residual before ln_final healthy: {residual_healthy}")
+            if not residual_healthy:
+                print(f"HEALTH CHECK: ❌ RESIDUAL BEFORE LN_FINAL CONTAINS NaN/Inf!")
+                print(f"HEALTH CHECK: Residual range: [{residual.min():.6f}, {residual.max():.6f}]")
+                print(f"HEALTH CHECK: Residual NaN count: {torch.isnan(residual).sum()}")
+                print(f"HEALTH CHECK: Residual Inf count: {torch.isinf(residual).sum()}")
+                
+                # Check individual layers in residual
+                if residual.ndim >= 2:
+                    print(f"HEALTH CHECK: Checking residual by position...")
+                    for pos in range(min(5, residual.shape[1])):  # Check first 5 positions
+                        pos_residual = residual[:, pos, :]
+                        pos_healthy = not (torch.isnan(pos_residual).any() or torch.isinf(pos_residual).any())
+                        if not pos_healthy:
+                            print(f"HEALTH CHECK: Position {pos} unhealthy - NaN: {torch.isnan(pos_residual).sum()}")
+        
+        final_residual = model.ln_final(residual)
+        
+        if debug:
+            print(f"HEALTH CHECK: Checking residual after ln_final...")
+            final_healthy = not (torch.isnan(final_residual).any() or torch.isinf(final_residual).any())
+            print(f"HEALTH CHECK: Residual after ln_final healthy: {final_healthy}")
+            if not final_healthy:
+                print(f"HEALTH CHECK: ❌ RESIDUAL AFTER LN_FINAL CONTAINS NaN/Inf!")
+                print(f"HEALTH CHECK: Final residual range: [{final_residual.min():.6f}, {final_residual.max():.6f}]")
+                print(f"HEALTH CHECK: Final residual NaN count: {torch.isnan(final_residual).sum()}")
+                print(f"HEALTH CHECK: Final residual Inf count: {torch.isinf(final_residual).sum()}")
+                
+                # Check ln_final parameters
+                if hasattr(model.ln_final, 'weight') and hasattr(model.ln_final, 'bias'):
+                    weight_healthy = not (torch.isnan(model.ln_final.weight).any() or torch.isinf(model.ln_final.weight).any())
+                    bias_healthy = not (torch.isnan(model.ln_final.bias).any() or torch.isinf(model.ln_final.bias).any())
+                    print(f"HEALTH CHECK: ln_final weight healthy: {weight_healthy}")
+                    print(f"HEALTH CHECK: ln_final bias healthy: {bias_healthy}")
+                    if not weight_healthy:
+                        print(f"HEALTH CHECK: ln_final weight range: [{model.ln_final.weight.min():.6f}, {model.ln_final.weight.max():.6f}]")
+                    if not bias_healthy:
+                        print(f"HEALTH CHECK: ln_final bias range: [{model.ln_final.bias.min():.6f}, {model.ln_final.bias.max():.6f}]")
+        
+        ctx._resid_activations[-1] = final_residual
     logger.info(f"Forward pass completed in {time.time() - phase_start:.2f}s")
 
     if offload:
