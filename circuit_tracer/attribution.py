@@ -319,24 +319,118 @@ def select_encoder_rows(
     return torch.cat(rows)
 
 
-def compute_partial_influences(edge_matrix, logit_p, row_to_node_index, max_iter=128, device=None):
+def compute_partial_influences(edge_matrix, logit_p, row_to_node_index, max_iter=128, device=None, debug=False):
     device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    if debug:
+        print(f"DEBUG: compute_partial_influences called with:")
+        print(f"  edge_matrix shape: {edge_matrix.shape}")
+        print(f"  logit_p shape: {logit_p.shape}")
+        print(f"  row_to_node_index shape: {row_to_node_index.shape}")
+        print(f"  max_iter: {max_iter}")
+        
+        # Analyze the raw edge matrix
+        print(f"  Raw edge_matrix stats:")
+        print(f"    Range: [{edge_matrix.min():.6f}, {edge_matrix.max():.6f}]")
+        print(f"    Mean: {edge_matrix.mean():.6f}")
+        print(f"    Std: {edge_matrix.std():.6f}")
+        print(f"    NaN count: {torch.isnan(edge_matrix).sum()}")
+        print(f"    Inf count: {torch.isinf(edge_matrix).sum()}")
+        print(f"    Zero count: {(edge_matrix == 0).sum()}")
+        print(f"    Sparsity: {(edge_matrix == 0).float().mean():.4f}")
 
     normalized_matrix = torch.empty_like(edge_matrix, device=device).copy_(edge_matrix)
     normalized_matrix = normalized_matrix.abs_()
     normalized_matrix /= normalized_matrix.sum(dim=1, keepdim=True).clamp(min=1e-8)
 
+    if debug:
+        print(f"  Normalized matrix stats:")
+        print(f"    Range: [{normalized_matrix.min():.6f}, {normalized_matrix.max():.6f}]")
+        print(f"    Mean: {normalized_matrix.mean():.6f}")
+        print(f"    Std: {normalized_matrix.std():.6f}")
+        print(f"    Row sums range: [{normalized_matrix.sum(dim=1).min():.6f}, {normalized_matrix.sum(dim=1).max():.6f}]")
+        
+        # Check if the matrix is triangular
+        if normalized_matrix.shape[0] == normalized_matrix.shape[1]:
+            upper_tri = torch.triu(normalized_matrix, diagonal=1)
+            lower_tri = torch.tril(normalized_matrix, diagonal=-1)
+            print(f"    Upper triangular norm: {upper_tri.norm():.6f}")
+            print(f"    Lower triangular norm: {lower_tri.norm():.6f}")
+            print(f"    Is approximately upper triangular: {lower_tri.norm() < 1e-6}")
+        
+        # Compute eigenvalues for small matrices
+        if normalized_matrix.shape[0] <= 1000 and normalized_matrix.shape[0] == normalized_matrix.shape[1]:
+            try:
+                eigenvals = torch.linalg.eigvals(normalized_matrix.cpu())
+                spectral_radius = eigenvals.abs().max().item()
+                print(f"    Spectral radius: {spectral_radius:.6f}")
+                print(f"    Largest eigenvalue (real): {eigenvals.real.max().item():.6f}")
+                print(f"    Smallest eigenvalue (real): {eigenvals.real.min().item():.6f}")
+                
+                # Check if spectral radius is problematic
+                if spectral_radius >= 1.0:
+                    print(f"    ⚠️  PROBLEM: Spectral radius >= 1.0 will cause divergence!")
+                    # Find the problematic eigenvalues
+                    problem_eigs = eigenvals[eigenvals.abs() >= 1.0]
+                    print(f"    Problematic eigenvalues: {problem_eigs}")
+                    
+            except Exception as e:
+                print(f"    Could not compute eigenvalues: {e}")
+        
+        # Analyze row_to_node_index
+        print(f"  row_to_node_index analysis:")
+        print(f"    Range: [{row_to_node_index.min()}, {row_to_node_index.max()}]")
+        print(f"    Is sorted: {torch.all(row_to_node_index[:-1] <= row_to_node_index[1:])}")
+        print(f"    Unique values: {len(torch.unique(row_to_node_index))}")
+        
+        # Check for cycles introduced by row_to_node_index
+        if len(row_to_node_index) <= 20:
+            print(f"    row_to_node_index: {row_to_node_index.tolist()}")
+
     influences = torch.zeros(edge_matrix.shape[1], device=normalized_matrix.device)
     prod = torch.zeros(edge_matrix.shape[1], device=normalized_matrix.device)
     prod[-len(logit_p) :] = logit_p
 
-    for _ in range(max_iter):
+    if debug:
+        print(f"  Initial prod stats:")
+        print(f"    Range: [{prod.min():.6f}, {prod.max():.6f}]")
+        print(f"    Norm: {prod.norm():.6f}")
+        print(f"    Non-zero elements: {(prod != 0).sum()}")
+
+    for iteration in range(max_iter):
+        old_prod = prod.clone()
         prod = prod[row_to_node_index] @ normalized_matrix
+        
+        if debug and (iteration < 10 or iteration % 50 == 0):
+            print(f"  Iteration {iteration}:")
+            print(f"    prod norm: {prod.norm():.6f}")
+            print(f"    prod range: [{prod.min():.6f}, {prod.max():.6f}]")
+            print(f"    Change from previous: {(prod - old_prod).norm():.6f}")
+            
+            # Check for growth
+            if iteration > 0:
+                growth_ratio = prod.norm() / (old_prod.norm() + 1e-8)
+                print(f"    Growth ratio: {growth_ratio:.6f}")
+                if growth_ratio > 1.1:
+                    print(f"    ⚠️  PROBLEM: Growth ratio > 1.1 indicates divergence!")
+        
         if not prod.any():
+            if debug:
+                print(f"  Converged to zero after {iteration + 1} iterations")
             break
         influences += prod
     else:
+        if debug:
+            print(f"  FAILED to converge after {max_iter} iterations")
+            print(f"  Final prod norm: {prod.norm():.6f}")
+            print(f"  Final influences norm: {influences.norm():.6f}")
         raise RuntimeError("Failed to converge")
+
+    if debug:
+        print(f"  Final influences stats:")
+        print(f"    Range: [{influences.min():.6f}, {influences.max():.6f}]")
+        print(f"    Norm: {influences.norm():.6f}")
+        print(f"    Non-zero elements: {(influences != 0).sum()}")
 
     return influences
 
@@ -364,6 +458,7 @@ def attribute(
     offload: Literal["cpu", "disk", None] = None,
     verbose: bool = False,
     update_interval: int = 4,
+    debug: bool = False,
 ) -> Graph:
     """Compute an attribution graph for *prompt*.
 
@@ -379,6 +474,7 @@ def attribute(
                  or None (no offloading).
         verbose: Whether to show progress information.
         update_interval: Number of batches to process before updating the feature ranking.
+        debug: Whether to enable detailed debugging output for convergence analysis.
 
     Returns:
         Graph: Fully dense adjacency (unpruned).
@@ -410,6 +506,7 @@ def attribute(
             offload_handles=offload_handles,
             update_interval=update_interval,
             logger=logger,
+            debug=debug,
         )
     finally:
         for reload_handle in offload_handles:
@@ -430,6 +527,7 @@ def _run_attribution(
     offload_handles,
     update_interval=4,
     logger=None,
+    debug=False,
 ):
     start_time = time.time()
     # Phase 0: precompute
@@ -524,7 +622,7 @@ def _run_attribution(
             pending = torch.arange(total_active_feats)
         else:
             influences = compute_partial_influences(
-                edge_matrix[:st], logit_p, row_to_node_index[:st]
+                edge_matrix[:st], logit_p, row_to_node_index[:st], debug=debug
             )
             feature_rank = torch.argsort(influences[:total_active_feats], descending=True).cpu()
             queue_size = min(update_interval * batch_size, max_feature_nodes - n_visited)
