@@ -319,7 +319,7 @@ def select_encoder_rows(
     return torch.cat(rows)
 
 
-def compute_partial_influences(edge_matrix, logit_p, row_to_node_index, max_iter=1024, device=None):
+def compute_partial_influences(edge_matrix, logit_p, row_to_node_index, max_iter=128, device=None):
     device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     normalized_matrix = torch.empty_like(edge_matrix, device=device).copy_(edge_matrix)
@@ -330,45 +330,13 @@ def compute_partial_influences(edge_matrix, logit_p, row_to_node_index, max_iter
     prod = torch.zeros(edge_matrix.shape[1], device=normalized_matrix.device)
     prod[-len(logit_p) :] = logit_p
 
-    # Debug: Check matrix properties
-    if max_iter > 128:  # Only for adapted models
-        print(f"DEBUG: Matrix shape {normalized_matrix.shape}")
-        print(f"DEBUG: Matrix range [{normalized_matrix.min():.6f}, {normalized_matrix.max():.6f}]")
-        print(f"DEBUG: Matrix density {(normalized_matrix != 0).float().mean():.4f}")
-        
-        # Check spectral radius on a small submatrix
-        if normalized_matrix.shape[0] <= 512:
-            try:
-                eigenvals = torch.linalg.eigvals(normalized_matrix.cpu()[:500, :500])
-                spectral_radius = eigenvals.abs().max().item()
-                print(f"DEBUG: Spectral radius (approx): {spectral_radius:.6f}")
-                if spectral_radius >= 1.0:
-                    print("DEBUG: WARNING - Spectral radius >= 1, may not converge!")
-            except:
-                print("DEBUG: Could not compute spectral radius")
-    
-    for i in range(max_iter):
-        old_prod_norm = torch.norm(prod)
+    for _ in range(max_iter):
         prod = prod[row_to_node_index] @ normalized_matrix
-        new_prod_norm = torch.norm(prod)
-        
         if not prod.any():
-            print(f"Converged after {i+1} iterations")
             break
         influences += prod
-        
-        # Enhanced progress reporting
-        if (i + 1) % 128 == 0:
-            change_ratio = new_prod_norm / (old_prod_norm + 1e-8)
-            print(f"Convergence progress: {i+1}/{max_iter} iterations ({(i+1)/max_iter*100:.1f}%) - growth ratio: {change_ratio:.4f}")
-            
-            # Early detection of non-convergence
-            if change_ratio > 0.999 and i > 256:
-                print(f"DEBUG: Slow convergence detected (ratio={change_ratio:.6f})")
     else:
-        print(f"DEBUG: Final prod norm: {torch.norm(prod):.6f}")
-        print(f"DEBUG: Final influences norm: {torch.norm(influences):.6f}")
-        raise RuntimeError(f"Failed to converge after {max_iter} iterations")
+        raise RuntimeError("Failed to converge")
 
     return influences
 
