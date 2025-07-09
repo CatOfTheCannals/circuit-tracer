@@ -92,6 +92,9 @@ class AttributionContext:
         proxy = weakref.proxy(self)
 
         def _cache(acts: torch.Tensor, hook: HookPoint, *, layer: int) -> torch.Tensor:
+            # Ensure activations require gradients for backward hooks
+            if not acts.requires_grad:
+                acts = acts.requires_grad_(True)
             proxy._resid_activations[layer] = acts
             return acts
 
@@ -743,6 +746,10 @@ def _run_attribution(
                         print(f"HEALTH CHECK: ln_final weight range: [{model.ln_final.weight.min():.6f}, {model.ln_final.weight.max():.6f}]")
                     if not bias_healthy:
                         print(f"HEALTH CHECK: ln_final bias range: [{model.ln_final.bias.min():.6f}, {model.ln_final.bias.max():.6f}]")
+        
+        # Ensure final_residual requires gradients for backward hooks
+        if not final_residual.requires_grad:
+            final_residual = final_residual.requires_grad_(True)
         
         ctx._resid_activations[-1] = final_residual
     logger.info(f"Forward pass completed in {time.time() - phase_start:.2f}s")
