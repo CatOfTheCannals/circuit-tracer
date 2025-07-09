@@ -655,7 +655,52 @@ def _run_attribution(
     logger.info("Phase 1: Running forward pass")
     phase_start = time.time()
     with ctx.install_hooks(model):
-        residual = model.forward(input_ids.expand(batch_size, -1), stop_at_layer=model.cfg.n_layers)
+        if debug:
+            print(f"HEALTH CHECK: Starting layer-by-layer forward pass debugging...")
+            expanded_input = input_ids.expand(batch_size, -1)
+            print(f"HEALTH CHECK: Input shape: {expanded_input.shape}")
+            
+            # Check layer by layer to find where NaN is introduced
+            current_residual = model.embed(expanded_input)
+            
+            embed_healthy = not (torch.isnan(current_residual).any() or torch.isinf(current_residual).any())
+            print(f"HEALTH CHECK: After embedding healthy: {embed_healthy}")
+            if not embed_healthy:
+                print(f"HEALTH CHECK: ❌ EMBEDDING CONTAINS NaN/Inf!")
+                print(f"HEALTH CHECK: Embedding range: [{current_residual.min():.6f}, {current_residual.max():.6f}]")
+            
+            # Check each transformer layer
+            for layer_idx in range(model.cfg.n_layers):
+                if embed_healthy or layer_idx <= 5:  # Only check first few layers if already corrupted
+                    old_residual = current_residual.clone()
+                    current_residual = model.blocks[layer_idx](current_residual)
+                    
+                    layer_healthy = not (torch.isnan(current_residual).any() or torch.isinf(current_residual).any())
+                    print(f"HEALTH CHECK: After layer {layer_idx} healthy: {layer_healthy}")
+                    
+                    if not layer_healthy:
+                        print(f"HEALTH CHECK: ❌ LAYER {layer_idx} INTRODUCED NaN/Inf!")
+                        print(f"HEALTH CHECK: Layer {layer_idx} range: [{current_residual.min():.6f}, {current_residual.max():.6f}]")
+                        print(f"HEALTH CHECK: Layer {layer_idx} NaN count: {torch.isnan(current_residual).sum()}")
+                        
+                        # Check if this is layer 3 (the LoRA adapted layer)
+                        if layer_idx == 3:
+                            print(f"HEALTH CHECK: 🎯 LAYER 3 IS THE LoRA ADAPTED LAYER!")
+                            print(f"HEALTH CHECK: This confirms LoRA adapter is causing NaN values")
+                            
+                            # Check the difference introduced by this layer
+                            layer_diff = current_residual - old_residual
+                            diff_healthy = not (torch.isnan(layer_diff).any() or torch.isinf(layer_diff).any())
+                            print(f"HEALTH CHECK: Layer 3 diff healthy: {diff_healthy}")
+                            if not diff_healthy:
+                                print(f"HEALTH CHECK: Layer 3 diff range: [{layer_diff.min():.6f}, {layer_diff.max():.6f}]")
+                                print(f"HEALTH CHECK: Layer 3 diff NaN count: {torch.isnan(layer_diff).sum()}")
+                        
+                        break  # Stop checking once we find the problematic layer
+            
+            residual = current_residual
+        else:
+            residual = model.forward(input_ids.expand(batch_size, -1), stop_at_layer=model.cfg.n_layers)
         
         if debug:
             print(f"HEALTH CHECK: Checking residual before ln_final...")
